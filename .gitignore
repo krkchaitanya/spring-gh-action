@@ -41,4 +41,7 @@ bin/
 .vscode/
 
 ### Mac OS ###
+.DS_Storetarget/
+.idea/
+*.iml
 .DS_Store
