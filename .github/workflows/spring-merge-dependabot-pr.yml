@@ -1,0 +1,143 @@
+name: Edit & Merge Dependabot PR
+
+on:
+  workflow_call:
+    inputs:
+      developmentGroup:
+        description: 'The Dependabot update group for development dependencies'
+        default: 'development-dependencies'
+        required: false
+        type: string
+      developmentLabel:
+        description: 'The issue label for this development dependencies pull request'
+        default: 'type: task'
+        required: false
+        type: string
+      dependenciesLabel:
+        description: 'The issue label for regular dependency upgrade pull request'
+        default: 'type: dependency-upgrade'
+        required: false
+        type: string
+      autoMerge:
+        description: 'Merged automatically without setting Milestone to the pull request'
+        default: false
+        required: false
+        type: boolean
+      autoMergeSnapshots:
+        description: 'Whether upgrades to SNAPSHOTs (usually after release against Milestone) are going to be merged automatically'
+        default: false
+        required: false
+        type: boolean
+      mergeArguments:
+        description: 'The arguments to pass to the gh pr merge command'
+        required: false
+        type: string
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  merge-dependabot-pr:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    steps:
+
+      - uses: actions/checkout@v7
+        with:
+          show-progress: false
+
+      - name: Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v3
+        with:
+         github-token: ${{ env.GH_TOKEN }}
+
+      # Dependabot does not have the ability to let us skip from '-SNAPSHOT' updates.
+      # The problem happens when there is a GA for snapshot we are using right now.
+      # For example, we have a '1.0.0-SNAPSHOT' after the previous update from the '1.0.0-RC1'.
+      # Now that dependency has gone to '1.0.0' GA, so we would expect an update like '1.0.0-SNAPSHOT -> 1.0.0',
+      # but Dependabot does '1.0.0-SNAPSHOT -> 1.0.1-SNAPSHOT'.
+      # Another example, if we have a '1.0.0-RC1' but Dependabot does upgrade to '1.0.1-SNAPSHOT' instead of '1.0.0'.
+      # This is wrong and causes extra burden in manual changes and commit history.
+      # Therefore, closing such a PR as invalid.
+      # See more info in: https://stackoverflow.com/questions/79204574/how-to-make-dependabot-to-not-update-from-snapshot
+      - name: Close if to SNAPSHOT update skipping GA
+        if: endsWith(steps.metadata.outputs.new-version, '-SNAPSHOT')
+        run: |
+          NEW_VERSION="${{ steps.metadata.outputs.new-version }}"
+          NEW_VERSION=${NEW_VERSION/-SNAPSHOT}
+          
+          PREVIOUS_VERSION="${{ steps.metadata.outputs.previous-version }}"
+          PREVIOUS_VERSION=${PREVIOUS_VERSION/-*} 
+          
+          if [ $NEW_VERSION != $PREVIOUS_VERSION ]
+          then
+            gh pr edit ${{ github.event.pull_request.number }} --add-label "status: invalid" --remove-milestone --remove-label "${{ inputs.dependenciesLabel }}"
+          
+            CLOSE_COMMENT="Upgrade from ${{ steps.metadata.outputs.previous-version }} to ${{ steps.metadata.outputs.new-version }} is not allowed"
+          
+            gh pr close ${{ github.event.pull_request.number }} --comment "$CLOSE_COMMENT" 
+          
+            gh run cancel ${{ github.run_id }}
+            echo "::warning title=Cannot merge::$CLOSE_COMMENT"
+            gh run watch ${{ github.run_id }}    
+          fi
+
+      - name: Add a label for development dependencies pull request
+        if: ${{ steps.metadata.outputs.dependency-group == inputs.developmentGroup || endsWith(steps.metadata.outputs.new-version, '-SNAPSHOT') }}
+        run: |
+          gh pr edit ${{ github.event.pull_request.number }} --add-label "${{ inputs.developmentLabel }}" --remove-label "${{ inputs.dependenciesLabel }}"
+
+      - name: Determine auto-merge
+        id: is-auto-merge
+        run: |
+          AUTO_MERGE=${{ inputs.autoMerge || (inputs.autoMergeSnapshots && endsWith(steps.metadata.outputs.new-version, '-SNAPSHOT')) }}
+          if [ -z $AUTO_MERGE ]
+          then
+            PR_MILESTONE=$(gh pr view ${{ github.event.pull_request.number }} --json milestone -q '.milestone.number')
+            if [ $PR_MILESTONE ]
+            then
+              AUTO_MERGE=true
+            fi
+          fi
+          echo autoMerge=$AUTO_MERGE >> $GITHUB_OUTPUT
+
+      - uses: actions/setup-java@v5.7.0
+        if: steps.is-auto-merge.outputs.autoMerge == 'false'
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Compute Version
+        if: steps.is-auto-merge.outputs.autoMerge == 'false'
+        id: compute-version
+        uses: spring-io/spring-release-actions/compute-version@0.0.5
+
+      - name: Find Milestone for Current Version in Branch
+        if: steps.is-auto-merge.outputs.autoMerge == 'false'
+        id: find-milestone
+        run: |
+          CURRENT_VERSION=${{ steps.compute-version.outputs.version }}
+          
+          export CANDIDATE_VERSION=${CURRENT_VERSION/-SNAPSHOT}
+          MILESTONE=$(gh api repos/$GITHUB_REPOSITORY/milestones --jq 'map(select(.title | startswith(env.CANDIDATE_VERSION))) | .[0].title')
+          
+          echo milestone=$MILESTONE >> $GITHUB_OUTPUT
+
+      - name: Set Milestone to Dependabot pull request
+        if: steps.is-auto-merge.outputs.autoMerge == 'false'
+        run: |
+          MILESTONE=${{ steps.find-milestone.outputs.milestone }}
+          
+          if [ -z $MILESTONE ]
+          then
+            gh run cancel ${{ github.run_id }}
+            echo "::warning title=Cannot merge::No milestone for ${{ steps.find-milestone.outputs.currentVersion }} version"
+            gh run watch ${{ github.run_id }}
+          else
+            gh pr edit ${{ github.event.pull_request.number }} --milestone $MILESTONE
+          fi
+
+      - name: Merge Dependabot pull request
+        if: ${{ !cancelled() }}
+        run: gh pr merge ${{ github.event.pull_request.number }} ${{ inputs.mergeArguments }}

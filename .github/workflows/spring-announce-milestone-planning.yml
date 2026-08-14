@@ -1,0 +1,48 @@
+name: Announce Milestone Planning in Chat
+
+# Must be used for `on:  milestone: types: [created, edited]` GH events, and repo must have `SPRING_RELEASE_CHAT_WEBHOOK_URL` secret
+
+on:
+  workflow_call:
+    secrets:
+      SPRING_RELEASE_CHAT_WEBHOOK_URL:
+        required: true
+
+jobs:
+  announce-milestone-planning:
+    runs-on: ubuntu-latest
+    if: github.event.milestone.due_on
+    steps:
+      - name: Announce milestone planning in chat
+        env:
+          GCHAT_WEBHOOK_URL: ${{ secrets.SPRING_RELEASE_CHAT_WEBHOOK_URL }}
+          EVENT_ACTION: ${{ github.event.action }}
+          PROJECT_NAME: ${{ github.event.repository.name }}
+          MILESTONE_TITLE: ${{ github.event.milestone.title }}
+          DUE_ON: ${{ github.event.milestone.due_on }}
+          PREVIOUS_DUE_ON: ${{ github.event.changes.due_on.from }}
+        run: |
+          set -euo pipefail
+
+          dueDate=${DUE_ON%T*}
+          previousDueDate=${PREVIOUS_DUE_ON%T*}
+
+          if [ "$EVENT_ACTION" = edited ] && [ "$previousDueDate" = "$dueDate" ]
+          then
+            exit 0
+          fi
+
+          if [ "$dueDate" = "$(date '+%F')" ]
+          then
+            dueDatePhrase=today
+          else
+            dueDatePhrase="on $(date -d "$dueDate" '+%B %d')"
+          fi
+
+          MESSAGE=$(jq -n \
+            --arg project "$PROJECT_NAME" \
+            --arg title "$MILESTONE_TITLE" \
+            --arg phrase "$dueDatePhrase" \
+            '{text: "\($project)-planning `\($title)` \($phrase)"}')
+
+          curl -s --show-error -X POST -H 'Content-Type: application/json' -d "$MESSAGE" "$GCHAT_WEBHOOK_URL"

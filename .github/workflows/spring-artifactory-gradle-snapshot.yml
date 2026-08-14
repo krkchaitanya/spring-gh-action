@@ -1,0 +1,55 @@
+name: CI Artifactory SNAPSHOT Build for Gradle
+
+on:
+  workflow_call:
+    inputs:
+      gradleTasks:
+        description: 'Additional Gradle tasks. The `build` and `artifactoryPublish` are included.'
+        required: false
+        type: string
+      artifactoryUrl:
+        description: 'The Artifactory Server'
+        required: false
+        type: string
+      targetRepository:
+        description: 'The Artifactory Repository to upload snapshot artifacts to'
+        required: false
+        type: string
+      artifactoryProjectKey:
+        description: 'The Artifactory project key'
+        required: false
+        type: string
+      runner:
+        description: 'The runner for job'
+        required: false
+        type: string
+        default: ubuntu-latest
+
+    secrets:
+      DEVELOCITY_ACCESS_KEY:
+        required: false
+      ARTIFACTORY_USERNAME:
+        required: true
+      ARTIFACTORY_PASSWORD:
+        required: true
+      GPG_PASSPHRASE:
+        required: false
+      GPG_PRIVATE_KEY:
+        required: false
+      NOTIFICATIONS_CHAT_WEBHOOK_URL:
+        required: false
+
+env:
+  DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
+
+jobs:
+  build-snapshot-with-gradle:
+    name: CI Build SNAPSHOT for ${{ github.ref_name }}
+    uses: ./.github/workflows/spring-artifactory-gradle-build.yml
+    with:
+      gradleTasks: ${{ inputs.gradleTasks }}
+      artifactoryUrl: ${{ inputs.artifactoryUrl }}
+      targetRepository: ${{ inputs.targetRepository }}
+      artifactoryProjectKey: ${{ inputs.artifactoryProjectKey }}
+      runner: ${{ inputs.runner }}
+    secrets: inherit

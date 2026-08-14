@@ -1,0 +1,145 @@
+name: Perform Post Release Procedures
+
+on:
+  workflow_call:
+    inputs:
+      preview:
+        description: 'True if this is a preview release'
+        required: false
+        type: string
+        default: 'false'
+
+    secrets:
+      SPRING_RELEASE_CHAT_WEBHOOK_URL:
+        required: false
+      GH_ACTIONS_REPO_TOKEN:
+        required: true
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  post-release:
+    runs-on: ubuntu-latest
+    if: github.event.created && startsWith(github.ref_name, 'v')
+    steps:
+
+      # publish-release-notes (below) runs a plain `git config user.name` internally, which
+      # needs an actual .git directory to write to - checkout is required for that alone.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          show-progress: false
+
+      - name: Compute Milestone
+        run: |
+          MILESTONE=${GITHUB_REF_NAME#v}
+          echo "MILESTONE=$MILESTONE" >> "$GITHUB_ENV"
+          echo "HOTFIX=$([[ $MILESTONE =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && echo true || echo false)" >> "$GITHUB_ENV"
+
+      - name: Transfer Commercial Issues to OSS Milestone
+        if: ${{ vars.COMMERCIAL != 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          OSS_REPO: ${{ github.repository }}
+          COMMERCIAL_REPO: ${{ github.repository }}-commercial
+        run: |
+          # A missing repository/milestone (gh api failure) is swallowed rather than failing the job.
+          milestoneNumber=$(gh api "repos/$COMMERCIAL_REPO/milestones?state=open" --jq ".[] | select(.title == \"$MILESTONE\") | .number" 2>/dev/null) || true
+          if [ -z "$milestoneNumber" ]; then
+            echo "::notice title=No Commercial Milestone::No open '$MILESTONE' milestone found in $COMMERCIAL_REPO, skipping issue transfer"
+            exit 0
+          fi
+
+          gh issue list -R "$COMMERCIAL_REPO" --milestone "$MILESTONE" --state all --limit 1000 --json number,title,state,labels --jq '.[] | @base64' |
+          while read -r encodedIssue; do
+            issue=$(echo "$encodedIssue" | base64 -d)
+            number=$(jq -r '.number' <<< "$issue")
+            title=$(jq -r '.title' <<< "$issue")
+            state=$(jq -r '.state | ascii_downcase' <<< "$issue")
+            mapfile -t labels < <(jq -r '.labels[].name' <<< "$issue")
+
+            createArgs=(--title "$title" --body "Backport of: https://github.com/$COMMERCIAL_REPO/issues/$number" --milestone "$MILESTONE")
+            for label in "${labels[@]}"; do
+              gh label create "$label" -R "$OSS_REPO" 2>/dev/null || true
+              createArgs+=(--label "$label")
+            done
+
+            newIssueUrl=$(gh issue create -R "$OSS_REPO" "${createArgs[@]}")
+
+            if [ "$state" = "closed" ]; then
+              gh issue close "$newIssueUrl" -R "$OSS_REPO" --reason completed
+            fi
+
+            echo "::notice title=Transferred Issue::$COMMERCIAL_REPO#$number -> $newIssueUrl"
+          done
+
+          gh api "repos/$COMMERCIAL_REPO/milestones/$milestoneNumber" -X PATCH -f state=closed
+
+      - name: Changelog Config File
+        run: |
+          repositoryTeam=$(gh api repos/$GITHUB_REPOSITORY/collaborators --jq 'map(select(.role_name == "admin") | .login) | join(",")')
+          repositoryVisibility=$(gh repo view --json visibility --jq 'if .visibility == "PUBLIC" then "true" else "false" end')
+
+          cat > changelog.properties <<EOF
+          changelog.contributors.exclude.names=$repositoryTeam
+          changelog.issues.generate-links=$repositoryVisibility
+          changelog.add-sections=true
+          changelog.sections[0].title=:warning: Attention Required
+          changelog.sections[0].labels[0]=for: upgrade-attention
+          changelog.sections[0].summary.mode=member-comment
+          changelog.sections[0].summary.config.prefix=Attention required:
+          EOF
+
+      - name: Generate Changelog
+        uses: spring-io/github-changelog-generator@v0.0.14
+        with:
+          milestone: ${{ env.MILESTONE }}
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          config-file: changelog.properties
+
+      - name: GitHub Release
+        uses: spring-io/spring-release-actions/publish-release-notes@0.0.5
+        with:
+          tag: ${{ github.ref_name }}
+
+      - name: Close Milestone
+        if: ${{ inputs.preview != 'true' }}
+        uses: spring-io/spring-release-actions/close-milestone@0.0.5
+        with:
+          version: ${{ env.MILESTONE }}
+
+      - name: Update Spring IO website for new version
+        if: ${{ env.HOTFIX != 'true' }}
+        uses: spring-io/spring-github-workflows/.github/actions/spring-website-project-version-update@main
+        with:
+          newVersion: ${{ env.MILESTONE }}
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Announce Release in Chat
+        if: ${{ inputs.preview != 'true' && env.CHAT_WEBHOOK_URL }}
+        uses: spring-io/spring-release-actions/announce-on-gchat@0.0.5
+        with:
+          gchat-webhook-url: ${{ env.CHAT_WEBHOOK_URL }}
+          version: ${{ env.MILESTONE }}
+        env:
+          CHAT_WEBHOOK_URL: ${{ secrets.SPRING_RELEASE_CHAT_WEBHOOK_URL }}
+
+      - id: support-window
+        if: ${{ env.HOTFIX != 'true' && !contains(env.MILESTONE, '-') }}
+        uses: spring-io/spring-release-actions/compute-support-window@0.0.5
+        with:
+          version: ${{ env.MILESTONE }}
+
+      - id: next-milestone
+        if: ${{ env.HOTFIX != 'true' && steps.support-window.outputs.support-type != 'eol' }}
+        continue-on-error: true
+        uses: spring-io/spring-release-actions/compute-next-version@0.0.5
+        with:
+          version: ${{ env.MILESTONE }}
+
+      # No due_on on the next milestone according to the day/week pattern since release might be skipped for next month
+      - name: Create Next Milestone
+        if: ${{ env.HOTFIX != 'true' && steps.next-milestone.outputs.version }}
+        run: gh api repos/$GITHUB_REPOSITORY/milestones -f title=${{ steps.next-milestone.outputs.version }} || true

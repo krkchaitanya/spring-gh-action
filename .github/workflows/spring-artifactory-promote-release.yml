@@ -1,0 +1,44 @@
+name: Promote Staged Release (Milestone or GA) in Artifactory
+
+on:
+  workflow_call:
+    inputs:
+      artifactoryProjectKey:
+        description: 'The Artifactory project key'
+        required: false
+        type: string
+      buildName:
+        description: 'The Artifactory Build Name'
+        required: true
+        type: string
+      buildNumber:
+        description: 'The Artifactory Build Number'
+        required: true
+        type: string
+      targetRepository:
+        description: 'The Artifactory Repository to promote the build to'
+        required: false
+        type: string
+        default: libs-release-local
+      runner:
+        description: 'The runner for job'
+        required: false
+        type: string
+        default: ubuntu-latest
+
+    secrets:
+      JF_ARTIFACTORY_SPRING:
+        required: true
+
+env:
+  JF_ENV_SPRING: ${{ secrets.JF_ARTIFACTORY_SPRING }}
+
+jobs:
+  promote-release-with-jfrog:
+    runs-on: ${{ inputs.runner }}
+    steps:
+
+      - uses: jfrog/setup-jfrog-cli@v5
+
+      - name: Promote Build
+        run: jfrog rt build-promote ${{ inputs.buildName }} ${{ inputs.buildNumber }} ${{ inputs.targetRepository }} --project=${{ inputs.artifactoryProjectKey }}

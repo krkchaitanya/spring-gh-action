@@ -1,0 +1,132 @@
+name: CI Artifactory Build for Gradle
+
+description: 'Builds the project with Gradle and publish artifacts to Artifactory. 
+If `releaseVersion` input is provided, the version is set to gradle.properties.
+They might be also used for getting access to the private Artifactory repository.
+The `artifactoryUrl` is `https://repo.spring.io` by default.
+The `targetRepository` is `libs-snapshot-local` by default.
+The buildName for build-info is based on the repository name and `releaseVersion` input (if provided).
+Otherwise the `github.ref_name` is used if it is not `main`.
+When `github.ref_name` is `main`, the `version` is read from gradle.properties and last number is replaced with `x`.'
+
+inputs:
+  artifactoryUrl:
+    description: 'The Artifactory Server'
+    required: false
+  artifactoryUsername:
+    description: 'The Artifactory User'
+    required: true
+  artifactoryPassword:
+    description: 'The Artifactory Password'
+    required: true
+  targetRepository:
+    description: 'The Artifactory Repository to upload artifacts to'
+    required: false
+  artifactoryProjectKey:
+    description: 'The Artifactory project key'
+    required: false
+  gradleTasks:
+    description: 'Additional Gradle tasks. The `build` and `publishAllPublicationsToDeploymentRepository` are included.'
+    required: false
+  releaseVersion:
+    description: 'The optional release version. Otherwise builds SNAPSHOT'
+    required: false
+  gpgPrivateKey:
+    description: 'A PGP/GPG signing key that will be used to sign artifacts before they are deployed'
+    required: false
+  gpgPassphrase:
+    description: 'Passphrase of the signing key'
+    required: false
+
+outputs:
+  buildName:
+    description: "The name of the build for Artifactory"
+    value: ${{ steps.build-name.outputs.buildName }}
+  buildNumber:
+    description: "The number of the build for Artifactory"
+    value: ${{ steps.build-name.outputs.buildNumber }}
+
+runs:
+  using: composite
+  steps:
+
+    - uses: spring-io/spring-gradle-build-action@v2
+
+    - name: Compute Version
+      id: compute-version
+      if: ${{ github.ref_name == 'main' }}
+      uses: spring-io/spring-release-actions/compute-version@0.0.5
+
+    - name: Set Release Version
+      if: inputs.releaseVersion
+      shell: bash
+      run: |
+        echo Set Release Version
+        
+        sed -i "s/version=.*/version=${{ inputs.releaseVersion }}/" gradle.properties
+
+    - name: Build and Publish
+      id: build-and-publish
+      shell: bash
+      run: |
+        echo Build and Publish
+        
+        printf "allprojects {
+                    afterEvaluate {
+                        pluginManager.withPlugin('maven-publish') {
+                            publishing {
+                                repositories {
+                                    maven {
+                                        it.url = System.getenv('GITHUB_WORKSPACE') + '/deployment-repository'
+                                        it.name = 'deployment'
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }" > deployment-repository-init.gradle
+        
+        ./gradlew clean build ${{ inputs.gradleTasks }} publishAllPublicationsToDeploymentRepository --init-script deployment-repository-init.gradle
+      env:
+        ARTIFACTORY_USERNAME: ${{ inputs.artifactoryUsername }}
+        ARTIFACTORY_PASSWORD: ${{ inputs.artifactoryPassword }}
+
+    - name: Evaluate Build Name
+      id: build-name
+      shell: bash
+      run: |
+        echo Evaluate Build Name
+
+        branchVersion=${{ github.ref_name }}
+
+        if [ $branchVersion = 'main' ]; then
+            snapshotVersion=${{ steps.compute-version.outputs.version }}
+            branchVersion=${snapshotVersion%.*}.x
+        fi
+
+        buildName=${{ github.event.repository.name }}-$branchVersion${{ inputs.releaseVersion != '' && '-release' || '' }}
+        buildNumber=${{ github.run_number }}
+        
+        echo buildName=$buildName >> $GITHUB_OUTPUT
+        echo buildNumber=$buildNumber >> $GITHUB_OUTPUT
+        
+        echo "::notice title=Artifactory Build Name & Number::$buildName/$buildNumber"
+
+    - name: Deploy
+      uses: spring-io/artifactory-deploy-action@v0.0.4
+      with:
+        uri: ${{ inputs.artifactoryUrl == '' && 'https://repo.spring.io' || inputs.artifactoryUrl }}
+        project: ${{ inputs.artifactoryProjectKey }}
+        username: ${{ inputs.artifactoryUsername }}
+        password: ${{ inputs.artifactoryPassword }}
+        build-name: ${{ steps.build-name.outputs.buildName }}
+        build-number: ${{ steps.build-name.outputs.buildNumber }}
+        repository: ${{ inputs.targetRepository == '' && 'libs-snapshot-local' || inputs.targetRepository }}
+        folder: 'deployment-repository'
+        artifact-properties: |
+          /**/*.zip::zip.name=${{ github.event.repository.name }},zip.deployed=false
+          /**/*docs.zip::zip.type=docs
+          /**/*dist.zip::zip.type=dist
+        threads: 10
+        signing-key: ${{ inputs.gpgPrivateKey }}
+        signing-passphrase: ${{ inputs.gpgPassphrase }}

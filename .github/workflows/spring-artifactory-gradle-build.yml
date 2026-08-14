@@ -1,0 +1,97 @@
+name: CI Artifactory Build for Gradle
+
+on:
+  workflow_call:
+    inputs:
+      releaseVersion:
+        description: 'Release version like 3.0.0-M1, 3.1.0-RC1, 3.2.0 etc. If not specified this workflow acts as a SNAPSHOT build.'
+        required: false
+        type: string
+      gradleTasks:
+        description: 'Additional Gradle tasks. The `build` and `publishAllPublicationsToDeploymentRepository` are included.'
+        required: false
+        type: string
+      artifactoryUrl:
+        description: 'The Artifactory Server'
+        required: false
+        type: string
+      targetRepository:
+        description: 'The Artifactory Repository to upload artifacts to'
+        required: false
+        type: string
+      artifactoryProjectKey:
+        description: 'The Artifactory project key'
+        required: false
+        type: string
+      runner:
+        description: 'The runner for job'
+        required: false
+        type: string
+        default: ubuntu-latest
+
+    outputs:
+      buildName:
+        description: 'Artifactory Build Name'
+        value: ${{ jobs.build-with-gradle.outputs.buildName }}
+      buildNumber:
+        description: 'Artifactory Build Number'
+        value: ${{ jobs.build-with-gradle.outputs.buildNumber }}
+
+    secrets:
+      DEVELOCITY_ACCESS_KEY:
+        required: false
+      ARTIFACTORY_USERNAME:
+        required: true
+      ARTIFACTORY_PASSWORD:
+        required: true
+      GPG_PASSPHRASE:
+        required: false
+      GPG_PRIVATE_KEY:
+        required: false
+      NOTIFICATIONS_CHAT_WEBHOOK_URL:
+        required: false
+
+env:
+  DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  NOTIFICATIONS_CHAT_WEBHOOK_URL: ${{ secrets.NOTIFICATIONS_CHAT_WEBHOOK_URL }}
+
+jobs:
+  build-with-gradle:
+    runs-on: ${{ inputs.runner }}
+    name: CI Build for ${{ github.ref_name }}
+    # A `permissions:` block sets every unlisted scope to 'none', not just adds to the defaults -
+    # contents: read must be listed explicitly here too, or checkout breaks on private repositories.
+    permissions:
+      contents: read
+
+    outputs:
+      buildName: ${{ steps.build-and-publish.outputs.buildName }}
+      buildNumber: ${{ steps.build-and-publish.outputs.buildNumber }}
+
+    steps:
+
+      - uses: actions/checkout@v7
+        with:
+          show-progress: false
+
+      - name: Build and Publish
+        id: build-and-publish
+        timeout-minutes: 30
+        uses: spring-io/spring-github-workflows/.github/actions/spring-artifactory-gradle-build@main
+        with:
+          releaseVersion: ${{ inputs.releaseVersion }}
+          gradleTasks: ${{ inputs.gradleTasks }}
+          artifactoryUrl: ${{ inputs.artifactoryUrl }}
+          targetRepository: ${{ inputs.targetRepository }}
+          artifactoryProjectKey: ${{ inputs.artifactoryProjectKey }}
+          artifactoryUsername: ${{ secrets.ARTIFACTORY_USERNAME }}
+          artifactoryPassword: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          gpgPrivateKey: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpgPassphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Notify Failure in Chat
+        if: ${{ failure() && env.NOTIFICATIONS_CHAT_WEBHOOK_URL }}
+        uses: spring-io/spring-github-workflows/.github/actions/spring-failure-to-gchat@main
+        with:
+          gchat-webhook-url: ${{ env.NOTIFICATIONS_CHAT_WEBHOOK_URL }}

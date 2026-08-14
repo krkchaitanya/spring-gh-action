@@ -1,0 +1,145 @@
+name: Perform Release with Maven and Artifactory
+
+on:
+  workflow_call:
+    inputs:
+      buildToolArgs:
+        description: 'Additional Maven command arguments: tasks, goals, plugins etc. The `install` for Maven is included.'
+        default: '-DskipTests'
+        required: false
+        type: string
+      artifactoryUrl:
+        description: 'The Artifactory Server'
+        required: false
+        type: string
+        default: https://repo.spring.io
+      stagingRepository:
+        description: 'The Artifactory Repository to stage artifacts to'
+        required: false
+        type: string
+        default: libs-staging-local
+      targetMilestoneRepository:
+        description: 'The Artifactory Repository to promote the milestone build to'
+        required: false
+        type: string
+        default: libs-milestone-local
+      targetReleaseRepository:
+        description: 'The Artifactory Repository to promote the release build to'
+        required: false
+        type: string
+        default: libs-release-local
+      artifactoryProjectKey:
+        description: 'The Artifactory project key'
+        required: false
+        type: string
+      verifyStagedWorkflow:
+        description: 'A workflow name in the target project to dispatch against staged artifacts. The `releaseVersion` must be a workflow input.'
+        required: false
+        type: string
+        default: verify-staged-artifacts.yml
+      runner:
+        description: 'The runner for job'
+        required: false
+        type: string
+        default: ubuntu-latest
+      bundleName:
+        description: 'The Artifactory Bundle Name'
+        required: false
+        type: string
+
+    secrets:
+      DEVELOCITY_ACCESS_KEY:
+        required: false
+      GH_ACTIONS_REPO_TOKEN:
+        required: true
+      CENTRAL_TOKEN_USERNAME:
+        required: false
+      CENTRAL_TOKEN_PASSWORD:
+        required: false
+      GPG_PASSPHRASE:
+        required: false
+      GPG_PRIVATE_KEY:
+        required: false
+      JF_ARTIFACTORY_SPRING:
+        required: true
+      ARTIFACTORY_USERNAME:
+        required: true
+      ARTIFACTORY_PASSWORD:
+        required: true
+
+jobs:
+  releaseVersion:
+    uses: ./.github/workflows/spring-find-release-version.yml
+
+  staging:
+    needs: releaseVersion
+    name: Stage ${{ needs.releaseVersion.outputs.releaseVersion }}
+    uses: ./.github/workflows/spring-artifactory-maven-release-staging.yml
+    with:
+      releaseVersion: ${{ needs.releaseVersion.outputs.releaseVersion }}
+      mavenArgs: ${{ inputs.buildToolArgs }}
+      artifactoryUrl: ${{ inputs.artifactoryUrl }}
+      stagingRepository: ${{ inputs.stagingRepository }}
+      artifactoryProjectKey: ${{ inputs.artifactoryProjectKey }}
+      runner: ${{ inputs.runner }}
+    secrets: inherit
+
+  verify-staged:
+    needs: [ releaseVersion, staging ]
+    name: Verify ${{ needs.releaseVersion.outputs.releaseVersion }}
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          show-progress: false
+
+      - name: Dispatch Workflow
+        timeout-minutes: 30
+        uses: spring-io/spring-github-workflows/.github/actions/spring-dispatch-workflow-and-wait@main
+        with:
+          workflow: ${{ inputs.verifyStagedWorkflow }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          inputs: '{ "releaseVersion": "${{ needs.releaseVersion.outputs.releaseVersion }}" }'
+
+  promote-release:
+    needs: [ releaseVersion, staging, verify-staged ]
+    name: Promote ${{ needs.releaseVersion.outputs.releaseVersion }}
+    uses: ./.github/workflows/spring-artifactory-promote-release.yml
+    with:
+      buildName: ${{ needs.staging.outputs.buildName }}
+      buildNumber: ${{ needs.staging.outputs.buildNumber }}
+      targetRepository: ${{ contains(needs.releaseVersion.outputs.releaseVersion, '-') && inputs.targetMilestoneRepository || inputs.targetReleaseRepository }}
+      runner: ${{ inputs.runner }}
+    secrets: inherit
+
+  deploy-to-central:
+    needs: [ releaseVersion, staging, promote-release ]
+    name: Deploy ${{ needs.releaseVersion.outputs.releaseVersion }} to Maven Central
+    if: ${{ !inputs.bundleName }}
+    uses: ./.github/workflows/spring-artifactory-deploy-to-maven-central.yml
+    with:
+      buildName: ${{ needs.staging.outputs.buildName }}
+      buildNumber: ${{ needs.staging.outputs.buildNumber }}
+    secrets: inherit
+
+  spring-release-bundle:
+    needs: [ releaseVersion, staging, promote-release ]
+    name: Release Bundle for ${{ needs.releaseVersion.outputs.releaseVersion }}
+    if: inputs.bundleName
+    uses: ./.github/workflows/spring-enterprise-release-bundle.yml
+    with:
+      buildName: ${{ needs.staging.outputs.buildName }}
+      buildNumber: ${{ needs.staging.outputs.buildNumber }}
+      artifactoryUrl: ${{ inputs.artifactoryUrl }}
+      bundleName: ${{ inputs.bundleName }}
+      releaseVersion: ${{ needs.releaseVersion.outputs.releaseVersion }}
+    secrets: inherit
+
+  finalize:
+    if: ${{ !(failure() || cancelled()) }}
+    needs: [ releaseVersion, deploy-to-central, spring-release-bundle ]
+    name: Finalize ${{ needs.releaseVersion.outputs.releaseVersion }}
+    uses: ./.github/workflows/spring-finalize-release.yml
+    with:
+      milestone: ${{ needs.releaseVersion.outputs.releaseVersion }}
+    secrets: inherit

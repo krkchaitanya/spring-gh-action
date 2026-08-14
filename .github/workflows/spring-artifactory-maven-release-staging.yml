@@ -1,0 +1,130 @@
+name: Build with Maven and Stage Release to Artifactory
+
+on:
+  workflow_call:
+    inputs:
+      releaseVersion:
+        description: 'Release version like 3.0.0-M1, 3.1.0-RC1, 3.2.0 etc.'
+        required: true
+        type: string
+      mavenArgs:
+        description: 'Additional mvn command arguments: goals, plugins etc. The `install` is included.'
+        required: false
+        type: string
+      artifactoryUrl:
+        description: 'The Artifactory Server'
+        required: false
+        type: string
+        default: https://repo.spring.io
+      stagingRepository:
+        description: 'The Artifactory Repository to stage artifacts to'
+        required: false
+        type: string
+        default: libs-staging-local
+      artifactoryProjectKey:
+        description: 'The Artifactory project key'
+        required: false
+        type: string
+      runner:
+        description: 'The runner for job'
+        required: false
+        type: string
+        default: ubuntu-latest
+
+    outputs:
+      buildName:
+        description: 'Artifactory Build Name'
+        value: ${{ jobs.staging-to-artifactory-with-maven.outputs.buildName }}
+      buildNumber:
+        description: 'Artifactory Build Number'
+        value: ${{ jobs.staging-to-artifactory-with-maven.outputs.buildNumber }}
+
+    secrets:
+      DEVELOCITY_ACCESS_KEY:
+        required: false
+      GH_ACTIONS_REPO_TOKEN:
+        required: true
+      ARTIFACTORY_USERNAME:
+        required: true
+      ARTIFACTORY_PASSWORD:
+        required: true
+      GPG_PRIVATE_KEY:
+        required: false
+      GPG_PASSPHRASE:
+        required: false
+
+env:
+  DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
+
+jobs:
+  staging-to-artifactory-with-maven:
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      buildName: ${{ steps.build-name.outputs.buildName }}
+      buildNumber: ${{ steps.build-name.outputs.buildNumber }}
+    steps:
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          show-progress: false
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5.7.0
+        with:
+          distribution: temurin
+          java-version: 24
+          cache: maven
+
+      - name: Compute Version
+        id: compute-version
+        uses: spring-io/spring-release-actions/compute-version@0.0.5
+
+      - name: Evaluate Build Name
+        id: build-name
+        run: |
+          branchVersion=${{ github.ref_name }}
+
+          if [ $branchVersion = 'main' ]; then
+            snapshotVersion=${{ steps.compute-version.outputs.version }}
+            branchVersion=${snapshotVersion%.*}.x
+          fi
+          
+          buildName=${{ github.event.repository.name }}-$branchVersion-release
+          buildNumber=${{ github.run_number }}
+          
+          echo buildName=$buildName >> $GITHUB_OUTPUT
+          echo buildNumber=$buildNumber >> $GITHUB_OUTPUT
+          echo "::notice title=Artifactory Build Name & Number::$buildName/$buildNumber"
+
+      - name: Set Release Version
+        run: mvn versions:set -DnewVersion=${{ inputs.releaseVersion }} -DgenerateBackupPoms=false -DprocessAllModules=true -B -ntp
+
+      - name: Build and Deploy
+        run: ./mvnw -B -ntp -DaltDeploymentRepository=local::file:deployment-repository ${{ inputs.mavenArgs }} deploy
+
+      - name: Capture Test Results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: '**/target/surefire-reports/*.*'
+          retention-days: 3
+
+      - name: Publish
+        uses: spring-io/artifactory-deploy-action@v0.0.4
+        with:
+          uri: ${{ inputs.artifactoryUrl }}
+          project: ${{ inputs.artifactoryProjectKey }}
+          username: ${{ secrets.ARTIFACTORY_USERNAME }}
+          password: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          build-name: ${{ steps.build-name.outputs.buildName }}
+          repository: ${{ inputs.stagingRepository }}
+          folder: deployment-repository
+          artifact-properties: |
+            /**/*.zip::zip.name=${{ github.event.repository.name }},zip.deployed=false
+            /**/*docs.zip::zip.type=docs
+            /**/*dist.zip::zip.type=dist
+          threads: 10
+          signing-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          signing-passphrase: ${{ secrets.GPG_PASSPHRASE }}

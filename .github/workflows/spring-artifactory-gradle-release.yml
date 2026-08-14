@@ -1,0 +1,157 @@
+name: Perform Release with Gradle and Artifactory
+
+on:
+  workflow_call:
+    inputs:
+      buildToolArgs:
+        description: 'Additional Gradle command arguments: tasks, options etc. The `build` and `publishAllPublicationsToDeploymentRepository` for Gradle are included.'
+        required: false
+        type: string
+      artifactoryUrl:
+        description: 'The Artifactory Server'
+        required: false
+        type: string
+      stagingRepository:
+        description: 'The Artifactory Repository to stage artifacts to'
+        required: false
+        type: string
+        default: libs-staging-local
+      targetMilestoneRepository:
+        description: 'The Artifactory Repository to promote the milestone build to'
+        required: false
+        type: string
+        default: libs-milestone-local
+      targetReleaseRepository:
+        description: 'The Artifactory Repository to promote the release build to'
+        required: false
+        type: string
+        default: libs-release-local
+      artifactoryProjectKey:
+        description: 'The Artifactory project key'
+        required: false
+        type: string
+      verifyStagedWorkflow:
+        description: 'A workflow name in the target project to dispatch against staged artifacts. The `releaseVersion` must be a workflow input.'
+        required: false
+        type: string
+        default: verify-staged-artifacts.yml
+      snapshotWorkflow:
+          description: 'A workflow name in the target project to check for latest green SNAPSHOT before going for release.'
+          required: false
+          type: string
+          default: ci-snapshot.yml
+      runner:
+        description: 'The runner for job'
+        required: false
+        type: string
+        default: ubuntu-latest
+      bundleName:
+        description: 'The Artifactory Bundle Name'
+        required: false
+        type: string
+
+    secrets:
+      DEVELOCITY_ACCESS_KEY:
+        required: false
+      GH_ACTIONS_REPO_TOKEN:
+        required: true
+      CENTRAL_TOKEN_USERNAME:
+        required: false
+      CENTRAL_TOKEN_PASSWORD:
+        required: false
+      GPG_PASSPHRASE:
+        required: false
+      GPG_PRIVATE_KEY:
+        required: false
+      JF_ARTIFACTORY_SPRING:
+        required: true
+      ARTIFACTORY_USERNAME:
+        required: true
+      ARTIFACTORY_PASSWORD:
+        required: true
+
+jobs:
+  release-version:
+    uses: ./.github/workflows/spring-find-release-version.yml
+
+  pre-release:
+    needs: release-version
+    name: Pre-release checks for ${{ needs.release-version.outputs.releaseVersion }}
+    uses: ./.github/workflows/spring-pre-release.yml
+    with:
+      milestone: ${{ needs.release-version.outputs.releaseVersion }}
+      snapshotWorkflow: ${{ inputs.snapshotWorkflow }}
+
+  staging:
+    needs: [ release-version, pre-release]
+    name: Stage ${{ needs.release-version.outputs.releaseVersion }}
+    uses: ./.github/workflows/spring-artifactory-gradle-build.yml
+    with:
+      releaseVersion: ${{ needs.release-version.outputs.releaseVersion }}
+      gradleTasks: ${{ inputs.buildToolArgs }}
+      artifactoryUrl: ${{ inputs.artifactoryUrl }}
+      targetRepository: ${{ inputs.stagingRepository }}
+      artifactoryProjectKey: ${{ inputs.artifactoryProjectKey }}
+      runner: ${{ inputs.runner }}
+    secrets: inherit
+
+  verify-staged:
+    needs: [ release-version, staging ]
+    name: Verify ${{ needs.release-version.outputs.releaseVersion }}
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          show-progress: false
+
+      - name: Dispatch Workflow
+        timeout-minutes: 30
+        uses: spring-io/spring-github-workflows/.github/actions/spring-dispatch-workflow-and-wait@main
+        with:
+          workflow: ${{ inputs.verifyStagedWorkflow }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          inputs: '{ "releaseVersion": "${{ needs.release-version.outputs.releaseVersion }}" }'
+
+  promote-release:
+    needs: [ release-version, staging, verify-staged ]
+    name: Promote ${{ needs.release-version.outputs.releaseVersion }}
+    uses: ./.github/workflows/spring-artifactory-promote-release.yml
+    with:
+      buildName: ${{ needs.staging.outputs.buildName }}
+      buildNumber: ${{ needs.staging.outputs.buildNumber }}
+      targetRepository: ${{ contains(needs.release-version.outputs.releaseVersion, '-') && inputs.targetMilestoneRepository || inputs.targetReleaseRepository }}
+      artifactoryProjectKey: ${{ inputs.artifactoryProjectKey }}
+      runner: ${{ inputs.runner }}
+    secrets: inherit
+
+  deploy-to-central:
+    needs: [ release-version, staging, promote-release ]
+    name: Deploy ${{ needs.release-version.outputs.releaseVersion }} to Maven Central
+    if: ${{ !inputs.bundleName }}
+    uses: ./.github/workflows/spring-artifactory-deploy-to-maven-central.yml
+    with:
+      buildName: ${{ needs.staging.outputs.buildName }}
+      buildNumber: ${{ needs.staging.outputs.buildNumber }}
+    secrets: inherit
+
+  release-bundle:
+    needs: [ release-version, staging, promote-release ]
+    name: Release Bundle for ${{ needs.release-version.outputs.releaseVersion }}
+    if: inputs.bundleName
+    uses: ./.github/workflows/spring-enterprise-release-bundle.yml
+    with:
+      buildName: ${{ needs.staging.outputs.buildName }}
+      buildNumber: ${{ needs.staging.outputs.buildNumber }}
+      artifactoryUrl: ${{ inputs.artifactoryUrl }}
+      bundleName: ${{ inputs.bundleName }}
+      releaseVersion: ${{ needs.release-version.outputs.releaseVersion }}
+    secrets: inherit
+
+  finalize:
+    if: ${{ !(failure() || cancelled()) }}
+    needs: [ release-version, deploy-to-central, release-bundle ]
+    name: Finalize ${{ needs.release-version.outputs.releaseVersion }} release
+    uses: ./.github/workflows/spring-finalize-release.yml
+    with:
+      milestone: ${{ needs.release-version.outputs.releaseVersion }}
+    secrets: inherit

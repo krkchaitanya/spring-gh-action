@@ -1,0 +1,83 @@
+name: Cut the Release Branch from Git Ref
+on:
+  workflow_call:
+
+    inputs:
+      milestone-number:
+        description: 'Milestone/RC suffix to append to the release version (if necessary), e.g. `M2` or `RC1`'
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      GH_ACTIONS_REPO_TOKEN:
+        required: true
+
+run-name: Cut Release Branch from ${{ github.ref_name }}
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+jobs:
+  cut-release-branch:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - uses: actions/checkout@v7
+        with:
+          show-progress: false
+          token: ${{ env.GITHUB_TOKEN }}
+
+      - name: Compute Version
+        id: compute-version
+        uses: spring-io/spring-release-actions/compute-version@0.0.5
+
+      - name: Compute Release Version
+        id: compute-release-version
+        env:
+          VERSION: ${{ steps.compute-version.outputs.version }}
+          MILESTONE_NUMBER: ${{ inputs.milestone-number }}
+        run: |
+          VERSION=${VERSION%-INTERNAL-SNAPSHOT}
+          VERSION=${VERSION%-SNAPSHOT}
+
+          if [ -n "$MILESTONE_NUMBER" ]
+          then
+            VERSION="$VERSION-${MILESTONE_NUMBER^^}"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check Release Branch Does Not Exist
+        env:
+          RELEASE_VERSION: ${{ steps.compute-release-version.outputs.version }}
+        run: |
+          if git ls-remote --exit-code --heads origin release/$RELEASE_VERSION
+          then
+            echo "::error title=Cannot cut release branch::Branch release/$RELEASE_VERSION already exists"
+            exit 1
+          fi
+
+      - name: Create Milestone
+        env:
+          RELEASE_VERSION: ${{ steps.compute-release-version.outputs.version }}
+        run: gh api repos/$GITHUB_REPOSITORY/milestones -f title=$RELEASE_VERSION || true
+
+      - name: Create Release Branch
+        env:
+          RELEASE_VERSION: ${{ steps.compute-release-version.outputs.version }}
+        run: |
+          git checkout -b release/$RELEASE_VERSION
+
+          if test -f pom.xml
+          then
+            mvn versions:set -DnewVersion=$RELEASE_VERSION -DgenerateBackupPoms=false -DprocessAllModules=true -B -ntp
+          else
+            sed -i "s/version=.*/version=$RELEASE_VERSION/" gradle.properties
+          fi
+
+          git config --global user.name 'Spring Builds'
+          git config --global user.email 'builds@springframework.org'
+          git commit -am "Prepare release $RELEASE_VERSION"
+          git push --set-upstream origin release/$RELEASE_VERSION

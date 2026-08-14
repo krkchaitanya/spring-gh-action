@@ -1,0 +1,68 @@
+name: Tag Release and Next Development Version
+
+on:
+  workflow_call:
+    inputs:
+      milestone:
+        description: 'Milestone title, e.g 3.0.0-M1, 3.1.0-RC1, 3.2.0 etc.'
+        required: true
+        type: string
+
+    secrets:
+      GH_ACTIONS_REPO_TOKEN:
+        required: true
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  SPRING_MAIN_BANNERMODE: off
+
+jobs:
+  finalize-release:
+    runs-on: ubuntu-latest
+    steps:
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          show-progress: false
+
+      - uses: actions/setup-java@v5.7.0
+        with:
+          distribution: temurin
+          java-version: 24
+
+      - name: Compute Next Snapshot
+        id: next-snapshot
+        uses: spring-io/spring-release-actions/compute-next-snapshot@0.0.5
+        with:
+          version: ${{ inputs.milestone }}
+
+      - name: Tag Release and Next Development Version
+        run: |
+          if test -f pom.xml
+          then
+            mvn versions:set -DnewVersion=${{ inputs.milestone }} -DgenerateBackupPoms=false -DprocessAllModules=true -B -ntp
+          else
+            sed -i "s/version=.*/version=${{ inputs.milestone }}/" gradle.properties
+          fi
+          git config --global user.name 'Spring Builds'
+          git config --global user.email 'builds@springframework.org'
+
+          git fetch origin --no-tags
+          git pull origin ${{ github.ref }}
+
+          git commit -a -m "[CI/CD] Release version ${{ inputs.milestone }}"
+          git tag "v${{ inputs.milestone }}"
+
+          NEXT_VERSION="${{ steps.next-snapshot.outputs.version }}"
+
+          if test -f pom.xml
+          then
+            mvn versions:set -DnewVersion=$NEXT_VERSION -DgenerateBackupPoms=false -DprocessAllModules=true -B -ntp
+          else
+            sed -i "s/version=.*/version=$NEXT_VERSION/" gradle.properties
+          fi
+
+          git commit -a -m "[CI/CD] Next development version"
+          git push origin
+          git push --tags origin

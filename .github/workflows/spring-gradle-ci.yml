@@ -1,0 +1,67 @@
+name: Continuous Integration Build for Gradle
+
+# This workflow is designed with an assumption that the target project supports the 'testJavaVersion' property.
+# Usually for testing scope:
+#
+# tasks.withType(Test).configureEach {
+#    javaLauncher = javaToolchains.launcherFor {
+#      languageVersion = JavaLanguageVersion.of(project.findProperty('testJavaVersion') ?: 25)
+#    }
+# }
+
+on:
+  workflow_call:
+    inputs:
+      testJavaVersion:
+        description: 'Java version for testing'
+        required: true
+        type: string
+      runner:
+        description: 'The runner for job'
+        required: false
+        type: string
+        default: ubuntu-latest
+
+    secrets:
+      DEVELOCITY_ACCESS_KEY:
+        required: false
+      ARTIFACTORY_USERNAME:
+        required: false
+      ARTIFACTORY_PASSWORD:
+        required: false
+      NOTIFICATIONS_CHAT_WEBHOOK_URL:
+        required: false
+
+env:
+  DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
+  ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+  ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  NOTIFICATIONS_CHAT_WEBHOOK_URL: ${{ secrets.NOTIFICATIONS_CHAT_WEBHOOK_URL }}
+
+jobs:
+  ci-with-gradle:
+    name: CI for ${{ github.ref_name }}
+    runs-on: ${{ inputs.runner }}
+    # A `permissions:` block sets every unlisted scope to 'none', not just adds to the defaults -
+    # contents: read must be listed explicitly here too, or checkout breaks on private repositories.
+    permissions:
+      contents: read
+
+    steps:
+
+      - uses: actions/checkout@v7
+        with:
+          show-progress: false
+
+      - uses: spring-io/spring-gradle-build-action@v2
+
+      - name: CI Build
+        run: ./gradlew test -PtestJavaVersion=${{ inputs.testJavaVersion }}
+
+      - name: Notify Failure in Chat
+        if: ${{ failure() && env.NOTIFICATIONS_CHAT_WEBHOOK_URL }}
+        uses: spring-io/spring-github-workflows/.github/actions/spring-failure-to-gchat@main
+        with:
+          gchat-webhook-url: ${{ env.NOTIFICATIONS_CHAT_WEBHOOK_URL }}
+

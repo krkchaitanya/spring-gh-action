@@ -1,0 +1,129 @@
+name: CI Artifactory SNAPSHOT Build for Maven
+
+on:
+  workflow_call:
+    inputs:
+      mavenArgs:
+        description: 'Additional mvn command arguments: goals, plugins etc. The `deploy` is included.'
+        required: false
+        type: string
+      artifactoryUrl:
+        description: 'The Artifactory Server'
+        required: false
+        type: string
+        default: https://repo.spring.io
+      targetRepository:
+        description: 'The Artifactory Repository to upload snapshot artifacts to'
+        required: false
+        type: string
+        default: libs-snapshot-local
+      artifactoryProjectKey:
+        description: 'The Artifactory project key'
+        required: false
+        type: string
+      runner:
+        description: 'The runner for job'
+        required: false
+        type: string
+        default: ubuntu-latest
+
+    secrets:
+      ARTIFACTORY_USERNAME:
+        required: true
+      ARTIFACTORY_PASSWORD:
+        required: true
+      DEVELOCITY_ACCESS_KEY:
+        required: false
+      GPG_PRIVATE_KEY:
+        required: false
+      GPG_PASSPHRASE:
+        required: false
+      NOTIFICATIONS_CHAT_WEBHOOK_URL:
+        required: false
+
+env:
+  DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  NOTIFICATIONS_CHAT_WEBHOOK_URL: ${{ secrets.NOTIFICATIONS_CHAT_WEBHOOK_URL }}
+
+jobs:
+  build_snapshot:
+    runs-on: ${{ inputs.runner }}
+    name: CI Build SNAPSHOT for ${{ github.ref_name }}
+    # A `permissions:` block sets every unlisted scope to 'none', not just adds to the defaults -
+    # contents: read must be listed explicitly here too, or checkout breaks on private repositories.
+    permissions:
+      contents: read
+
+    steps:
+
+      - uses: actions/checkout@v7
+        with:
+          show-progress: false
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5.7.0
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+
+      - name: Compute Version
+        id: compute-version
+        if: ${{ github.ref_name == 'main' }}
+        uses: spring-io/spring-release-actions/compute-version@0.0.5
+
+      - name: Build and Deploy
+        run: ./mvnw -B -ntp -DaltDeploymentRepository=local::file:deployment-repository ${{ inputs.mavenArgs }} deploy
+
+      - name: Evaluate Build Name
+        id: build-name
+        run: |
+          echo Evaluate Build Name
+
+          branchVersion=${{ github.ref_name }}
+
+          if [ $branchVersion = 'main' ]; then
+              snapshotVersion=${{ steps.compute-version.outputs.version }}
+              branchVersion=${snapshotVersion%.*}.x
+          fi
+
+          buildName=${{ github.event.repository.name }}-$branchVersion
+          buildNumber=${{ github.run_number }}
+
+          echo buildName=$buildName >> $GITHUB_OUTPUT
+          echo buildNumber=$buildNumber >> $GITHUB_OUTPUT
+
+          echo "::notice title=Artifactory Build Name & Number::$buildName/$buildNumber"
+
+      - name: Publish
+        uses: spring-io/artifactory-deploy-action@v0.0.4
+        with:
+          uri: ${{ inputs.artifactoryUrl }}
+          project: ${{ inputs.artifactoryProjectKey }}
+          username: ${{ secrets.ARTIFACTORY_USERNAME }}
+          password: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          build-name: ${{ steps.build-name.outputs.buildName }}
+          repository: ${{ inputs.targetRepository }}
+          folder: deployment-repository
+          artifact-properties: |
+            /**/*.zip::zip.name=${{ github.event.repository.name }},zip.deployed=false
+            /**/*docs.zip::zip.type=docs
+            /**/*dist.zip::zip.type=dist
+          threads: 10
+          signing-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          signing-passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Capture Test Results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: '**/target/surefire-reports/*.*'
+          retention-days: 3
+
+      - name: Notify Failure in Chat
+        if: ${{ failure() && env.NOTIFICATIONS_CHAT_WEBHOOK_URL }}
+        uses: spring-io/spring-github-workflows/.github/actions/spring-failure-to-gchat@main
+        with:
+          gchat-webhook-url: ${{ env.NOTIFICATIONS_CHAT_WEBHOOK_URL }}

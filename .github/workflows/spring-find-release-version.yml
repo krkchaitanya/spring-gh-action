@@ -1,0 +1,43 @@
+name: Find Current Version to Release
+
+on:
+  workflow_call:
+    outputs:
+      releaseVersion:
+        description: Current Milestone to release
+        value: ${{ jobs.find-release-version.outputs.releaseVersion }}
+      hotfix:
+        description: 'True if Milestone is hotfix'
+        value: ${{ jobs.find-release-version.outputs.hotfix }}
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  find-release-version:
+    runs-on: ubuntu-latest
+    outputs:
+      releaseVersion: ${{ steps.milestone.outputs.milestone }}
+      hotfix: ${{ steps.milestone.outputs.hotfix }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          show-progress: false
+
+      - name: Compute next scheduled milestone
+        id: milestone
+        uses: spring-io/spring-github-workflows/.github/actions/spring-compute-milestone-to-release@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Version to Release
+        run: |
+          RELEASE_VERSION=${{ steps.milestone.outputs.milestone }}
+          if [ -z $RELEASE_VERSION ]
+          then
+            gh run cancel ${{ github.run_id }}
+            echo "::warning title=Nothing to release::No scheduled milestone for ${{ steps.compute-version.outputs.version }} version"
+          else
+            echo "::notice title=RELEASE VERSION::$RELEASE_VERSION"
+          fi
