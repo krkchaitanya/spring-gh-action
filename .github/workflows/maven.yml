@@ -1,4 +1,4 @@
-name: Java CI with Maven
+name: Java CI with Maven and Docker
 
 on:
   push:
@@ -21,5 +21,18 @@ jobs:
           distribution: "temurin"
           cache: maven
 
-      - name: Build with Maven
+      - name: Build JAR with Maven
         run: mvn -B clean package --file pom.xml
+
+      - name: Build Docker image
+        run: docker build -t spring-gh-action:latest .
+
+      - name: Run Docker container
+        run: |
+          docker run -d --name spring-app -p 9900:9900 spring-gh-action:latest
+          sleep 10
+          docker ps
+
+      - name: Show application logs
+        if: always()
+        run: docker logs spring-app
